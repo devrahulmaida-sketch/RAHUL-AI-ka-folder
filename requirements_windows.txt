@@ -1,0 +1,9 @@
+# RAHUL V4 — Windows Extra Requirements
+# Run AFTER requirements.txt:
+# pip install -r requirements_windows.txt
+
+# Windows screenshot (Pillow already installed, ImageGrab works on Windows)
+pywin32>=306
+
+# Clipboard on Windows (no xclip needed)
+pyperclip>=1.8.2

@@ -1,0 +1,35 @@
+# RAHUL Advanced AI v4.0 — Requirements
+# Install: pip install -r requirements.txt
+
+# Core
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# UI
+Pillow>=10.0.0
+
+# Web & Search (free)
+duckduckgo-search>=6.0.0
+beautifulsoup4>=4.12.0
+
+# Browser automation
+playwright>=1.40.0
+
+# System monitoring
+psutil>=5.9.0
+
+# Translation (free)
+deep-translator>=1.11.0
+
+# PDF
+pypdf>=4.0.0
+
+# YouTube
+youtube-transcript-api>=0.6.0
+
+# Image
+opencv-python>=4.8.0
+
+# Voice (optional)
+# edge-tts>=6.1.9
+# SpeechRecognition>=3.10.0
