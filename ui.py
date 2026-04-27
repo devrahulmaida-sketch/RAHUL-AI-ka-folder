@@ -26,7 +26,7 @@ CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
 
 SYSTEM_NAME = "RAHUL"
-VERSION     = "v3.0 Linux"
+VERSION     = "v5.0 Ollama"
 
 # ── THEMES ──────────────────────────────────────────────────────────────────
 THEMES = {
@@ -72,13 +72,28 @@ class Particle:
 
 # ── AnimationOverlay — renders rich content inside the UI ───────────────────
 class AnimationOverlay:
-    """Handles all in-UI content animations (cards, charts, lists, etc.)"""
+    """Renders rich content animations on a SEPARATE top-layer canvas.
+    Uses a dedicated canvas placed on top of main bg canvas — 
+    so c.delete('all') on bg never wipes animations."""
 
-    def __init__(self, canvas: tk.Canvas, ui):
-        self.c   = canvas
-        self.ui  = ui
+    def __init__(self, root_widget, W: int, H: int):
+        self.root   = root_widget
         self._items: list[dict] = []
-        self._lock = threading.Lock()
+        self._lock  = threading.Lock()
+
+        # Dedicated overlay canvas — transparent bg, on top of main canvas
+        self.c = tk.Canvas(
+            root_widget, bg="",
+            highlightthickness=0,
+        )
+        self.c.place(x=0, y=0, width=W, height=H)
+        # Ensure it stays on top but allows click-through on empty areas
+        self.c.lift()
+        self._W, self._H = W, H
+
+    def resize(self, W: int, H: int):
+        self._W, self._H = W, H
+        self.c.place(x=0, y=0, width=W, height=H)
 
     def show(self, anim_type: str, title: str, content: str = "",
              color: str = "", duration: int = 8, image_path: str = ""):
@@ -93,14 +108,15 @@ class AnimationOverlay:
             "type": anim_type, "title": title, "data": data,
             "color": col, "duration": duration, "image_path": image_path,
             "start": time.time(), "alpha": 0.0, "done": False,
-            "scroll_x": 0,       # for news ticker
-            "step_idx": 0,       # for steps
+            "scroll_x": 0, "step_idx": 0,
         }
         with self._lock:
             self._items = [i for i in self._items if not i["done"]]
             self._items.append(entry)
 
     def draw_all(self, W, H, tick):
+        """Called every animation frame — clears and redraws overlay canvas."""
+        self.c.delete("all")   # clear ONLY the overlay canvas
         now = time.time()
         with self._lock:
             active = [i for i in self._items if not i["done"]]
@@ -108,42 +124,31 @@ class AnimationOverlay:
         if not active:
             return
 
-        # Show latest overlay
-        item = active[-1]
-        elapsed  = now - item["start"]
+        item    = active[-1]
+        elapsed = now - item["start"]
         fade_in  = min(1.0, elapsed / 0.6)
         fade_out = 1.0 if elapsed < item["duration"] - 1.0 else max(0.0, item["duration"] - elapsed)
         alpha    = int(min(fade_in, fade_out) * 255)
-        item["alpha"] = alpha / 255
 
         if elapsed >= item["duration"]:
             item["done"] = True
             return
 
         t = item["type"]
-
-        if t == "card":
-            self._draw_card(item, W, H, alpha, tick)
-        elif t == "list":
-            self._draw_list(item, W, H, alpha, tick)
-        elif t == "chart":
-            self._draw_chart(item, W, H, alpha, tick)
-        elif t == "steps":
-            self._draw_steps(item, W, H, alpha, tick)
-        elif t == "news_ticker":
-            self._draw_ticker(item, W, H, alpha, tick)
-        elif t == "comparison":
-            self._draw_comparison(item, W, H, alpha, tick)
-        elif t == "weather":
-            self._draw_weather(item, W, H, alpha, tick)
-        elif t == "typewriter":
-            self._draw_typewriter(item, W, H, alpha, tick)
-        elif t == "countdown":
-            self._draw_countdown(item, W, H, alpha, tick)
-        elif t == "image":
-            self._draw_image(item, W, H, alpha)
-        else:
-            self._draw_card(item, W, H, alpha, tick)
+        dispatch = {
+            "card":        self._draw_card,
+            "list":        self._draw_list,
+            "chart":       self._draw_chart,
+            "steps":       self._draw_steps,
+            "news_ticker": self._draw_ticker,
+            "comparison":  self._draw_comparison,
+            "weather":     self._draw_weather,
+            "typewriter":  self._draw_typewriter,
+            "countdown":   self._draw_countdown,
+            "image":       self._draw_image,
+        }
+        fn = dispatch.get(t, self._draw_card)
+        fn(item, W, H, alpha, tick)
 
     def _ac(self, r, g, b, a):
         f = a / 255.0
@@ -446,6 +451,7 @@ class RahulUI:
         self.status_blink = True
         self._jarvis_state = "INITIALISING"
         self.on_text_command = None
+        self.on_voice_toggle = None  # callback(bool) for voice on/off
 
         # Advanced
         self.particles      = []
@@ -486,8 +492,8 @@ class RahulUI:
         self.bg = tk.Canvas(self.root, width=W, height=H, bg="#000000", highlightthickness=0)
         self.bg.place(x=0, y=0)
 
-        # Animation overlay
-        self.anim = AnimationOverlay(self.bg, self)
+        # Animation overlay — separate canvas on top of bg
+        self.anim = AnimationOverlay(self.root, W, H)
 
         # Panels
         self._build_right_panel()
@@ -653,6 +659,59 @@ class RahulUI:
         self._mute_c.bind("<Button-1>", lambda e: self._toggle_mute())
         self._draw_mute()
 
+        # Voice input toggle button (next to mute)
+        self._voice_active = False
+        self._voice_c = tk.Canvas(self.root, width=130, height=32, bg="#000000",
+                                   highlightthickness=0, cursor="hand2")
+        self._voice_c.place(x=150, y=self.H - 66)
+        self._voice_c.bind("<Button-1>", lambda e: self._toggle_voice())
+        self._draw_voice_btn()
+
+        # TTS toggle button
+        self._tts_active = True
+        self._tts_c = tk.Canvas(self.root, width=100, height=32, bg="#000000",
+                                 highlightthickness=0, cursor="hand2")
+        self._tts_c.place(x=286, y=self.H - 66)
+        self._tts_c.bind("<Button-1>", lambda e: self._toggle_tts())
+        self._draw_tts_btn()
+
+    def _draw_voice_btn(self):
+        c = self._voice_c
+        c.delete("all")
+        if self._voice_active:
+            bd, fl, ic, lb, fg = T("GREEN"), "#001a0a", "🎤", " ON", T("GREEN")
+        else:
+            bd, fl, ic, lb, fg = T("DIM"), T("PANEL"), "🎤", " OFF", T("DIM")
+        c.create_rectangle(0, 0, 130, 32, outline=bd, fill=fl, width=1)
+        c.create_text(65, 16, text=f"VOICE{ic}{lb}", fill=fg, font=("Courier", 9, "bold"))
+
+    def _draw_tts_btn(self):
+        c = self._tts_c
+        c.delete("all")
+        if self._tts_active:
+            bd, fl, lb, fg = T("ACC2"), "#1a1400", "🔊 ON", T("ACC2")
+        else:
+            bd, fl, lb, fg = T("DIM"), T("PANEL"), "🔇 OFF", T("DIM")
+        c.create_rectangle(0, 0, 100, 32, outline=bd, fill=fl, width=1)
+        c.create_text(50, 16, text=lb, fill=fg, font=("Courier", 9, "bold"))
+
+    def _toggle_voice(self):
+        self._voice_active = not self._voice_active
+        self._draw_voice_btn()
+        if self._voice_active:
+            self.write_log("SYS: Voice input ON — bol ke command do!")
+            if self.on_voice_toggle:
+                self.on_voice_toggle(True)
+        else:
+            self.write_log("SYS: Voice input OFF.")
+            if self.on_voice_toggle:
+                self.on_voice_toggle(False)
+
+    def _toggle_tts(self):
+        self._tts_active = not self._tts_active
+        self._draw_tts_btn()
+        self.write_log(f"SYS: TTS {'ON' if self._tts_active else 'OFF'}")
+
     def _draw_mute(self):
         c = self._mute_c
         c.delete("all")
@@ -672,6 +731,22 @@ class RahulUI:
         else:
             self.set_state("LISTENING")
             self.write_log("SYS: Mic active.")
+
+    def _stream_token(self, token: str):
+        """Called during streaming — shows tokens as they arrive in log."""
+        # Accumulate tokens, flush on sentence end or punctuation
+        if not hasattr(self, "_stream_buf"):
+            self._stream_buf = ""
+        self._stream_buf += token
+        # Flush on sentence boundaries
+        if any(c in token for c in ".!?\n") or len(self._stream_buf) > 60:
+            buf = self._stream_buf.strip()
+            if buf:
+                self.log_text.configure(state="normal")
+                self.log_text.insert(tk.END, buf + " ", "ai")
+                self.log_text.see(tk.END)
+                self.log_text.configure(state="disabled")
+            self._stream_buf = ""
 
     # ── Input bar ─────────────────────────────────────────────────────────────
     def _build_input_bar(self, lw, y):
@@ -945,6 +1020,7 @@ class RahulUI:
         if self._active_tool_t > 0: self._active_tool_t -= 1
 
         self._draw()
+        self.anim.draw_all(self.W, self.H, t)  # overlay on top
         self.root.after(16, self._animate)
 
     # ── Draw ──────────────────────────────────────────────────────────────────
@@ -1052,8 +1128,7 @@ class RahulUI:
                            fill=self._ac(*pr,min(255,int(self.halo_a*2))),
                            font=("Courier",14,"bold"))
 
-        # ── Draw animation overlays (cards, charts, etc.)
-        self.anim.draw_all(W, H, t)
+        # (Animation overlay draws itself on its own canvas)
 
         # Header
         c.create_rectangle(0,0,W,60, fill="#00080d", outline="")
@@ -1161,140 +1236,121 @@ class RahulUI:
     def stop_speaking(self):
         if not self.muted: self.set_state("LISTENING")
 
-    # ── API / Setup (v4.0 — Multi-provider) ──────────────────────────────────
+    # ── API / Setup (v5.0 — Ollama local) ────────────────────────────────────
     def _api_keys_exist(self):
-        """Check .env OR config json for any valid API key."""
-        env_path = BASE_DIR / ".env"
-        if env_path.exists():
-            try:
-                content = env_path.read_text(encoding="utf-8")
-                for key_name in ["OPENROUTER_KEY", "NVIDIA_KEY", "GROQ_KEY"]:
-                    for line in content.splitlines():
-                        if line.startswith(f"{key_name}="):
-                            val = line.split("=", 1)[1].strip()
-                            if val and "your_" not in val and len(val) > 8:
-                                return True
-            except Exception:
-                pass
-        if API_FILE.exists():
-            try:
-                d = json.loads(API_FILE.read_text())
-                return bool(
-                    d.get("openrouter_key") or
-                    d.get("nvidia_key")     or
-                    d.get("groq_key")
-                )
-            except Exception:
-                pass
-        return False
+        """v5: Just check if Ollama is running."""
+        try:
+            import requests
+            r = requests.get("http://localhost:11434/api/tags", timeout=2)
+            return r.status_code == 200
+        except Exception:
+            return False
 
     def wait_for_api_key(self):
         while not self._api_key_ready:
-            time.sleep(0.1)
+            time.sleep(0.2)
 
     def _show_setup_ui(self):
-        """v4.0 Setup — OpenRouter + Nvidia + Groq (all free)."""
+        """v5.0 Setup — Ollama local model selection."""
         self.setup_frame = tk.Frame(
             self.root, bg="#00080d",
             highlightbackground=T("PRI"), highlightthickness=2,
         )
         self.setup_frame.place(relx=0.40, rely=0.5, anchor="center")
 
-        tk.Label(self.setup_frame, text="◈  RAHUL  v4.0  SETUP",
+        tk.Label(self.setup_frame, text="◈  RAHUL  v5.0  SETUP",
                  fg=T("PRI"), bg="#00080d",
                  font=("Courier", 15, "bold")).pack(pady=(22, 4))
         tk.Label(self.setup_frame,
-                 text="Multi-Provider AI  •  OpenRouter + Nvidia + Groq",
+                 text="Local AI  •  Ollama  •  No API Key Needed",
                  fg=T("MID"), bg="#00080d",
                  font=("Courier", 9)).pack(pady=(0, 16))
 
-        fields = [
-            ("OPENROUTER KEY  (free → openrouter.ai)",   "openrouter"),
-            ("NVIDIA NIM KEY  (free → build.nvidia.com)", "nvidia"),
-            ("GROQ KEY        (free → console.groq.com)", "groq"),
-        ]
-        self._key_entries = {}
-        for label, key in fields:
-            tk.Label(self.setup_frame, text=label, fg=T("DIM"),
-                     bg="#00080d", font=("Courier", 8)).pack(pady=(6, 2))
-            e = tk.Entry(
-                self.setup_frame, width=54, fg=T("TEXT"), bg="#000d12",
-                insertbackground=T("TEXT"), borderwidth=0,
-                font=("Courier", 10), show="*",
-            )
-            e.pack(pady=(0, 4))
-            self._key_entries[key] = e
+        # Status
+        self._status_var = tk.StringVar(value="Checking Ollama…")
+        tk.Label(self.setup_frame, textvariable=self._status_var,
+                 fg=T("ACC2"), bg="#00080d",
+                 font=("Courier", 9)).pack(pady=(0, 12))
 
-        tk.Frame(self.setup_frame, bg=T("DIM"),
-                 height=1).pack(fill="x", padx=24, pady=(12, 14))
-
-        tk.Label(self.setup_frame,
-                 text="★  At least ONE key required  •  More = better reliability",
+        # Model list
+        tk.Label(self.setup_frame, text="SELECT MODEL",
                  fg=T("DIM"), bg="#00080d",
-                 font=("Courier", 8)).pack(pady=(0, 8))
+                 font=("Courier", 8)).pack(pady=(0, 4))
+
+        self._model_var = tk.StringVar(value="llama3")
+        self._model_entry = tk.Entry(
+            self.setup_frame, textvariable=self._model_var,
+            fg=T("TEXT"), bg="#000d12",
+            insertbackground=T("TEXT"), borderwidth=0,
+            font=("Courier", 11), width=30,
+        )
+        self._model_entry.pack(pady=(0, 8))
+
+        self._models_frame = tk.Frame(self.setup_frame, bg="#00080d")
+        self._models_frame.pack(pady=(0, 16))
+        tk.Label(self._models_frame, text="Available models loading…",
+                 fg=T("DIM"), bg="#00080d",
+                 font=("Courier", 8)).pack()
+
+        tk.Frame(self.setup_frame, bg=T("DIM"), height=1).pack(fill="x", padx=24, pady=(0, 14))
 
         tk.Button(
-            self.setup_frame, text="▸  START RAHUL v4.0",
+            self.setup_frame, text="▸  START RAHUL v5.0",
             command=self._save_api,
             bg="#000000", fg=T("PRI"),
             activebackground=T("DIM"),
             font=("Courier", 12, "bold"),
             borderwidth=0, pady=12, padx=30, cursor="hand2",
-        ).pack(pady=(0, 10))
+        ).pack(pady=(0, 8))
 
         tk.Label(self.setup_frame,
-                 text="Tip: No microphone needed — fully typing-based!",
+                 text="Ollama not installed? → ollama.ai",
                  fg=T("DIM"), bg="#00080d",
                  font=("Courier", 7)).pack(pady=(0, 14))
 
-    def _save_api(self):
-        entries = self._key_entries
-        or_key  = entries["openrouter"].get().strip()
-        nv_key  = entries["nvidia"].get().strip()
-        gr_key  = entries["groq"].get().strip()
+        # Check Ollama in background
+        threading.Thread(target=self._check_ollama_setup, daemon=True).start()
 
-        if not any([or_key, nv_key, gr_key]):
-            for e in entries.values():
-                e.configure(
-                    highlightthickness=1,
-                    highlightbackground=T("RED"),
-                    highlightcolor=T("RED"),
-                )
+    def _check_ollama_setup(self):
+        try:
+            import requests
+            r = requests.get("http://localhost:11434/api/tags", timeout=3)
+            if r.status_code == 200:
+                models = [m["name"] for m in r.json().get("models", [])]
+                if models:
+                    self._status_var.set(f"✓ Ollama running — {len(models)} models")
+                    # Show model buttons
+                    for w in self._models_frame.winfo_children():
+                        w.destroy()
+                    for m in models[:6]:
+                        tk.Button(
+                            self._models_frame, text=m[:35],
+                            command=lambda mn=m: self._model_var.set(mn),
+                            bg="#001520", fg=T("PRI"),
+                            font=("Courier", 8), borderwidth=0,
+                            cursor="hand2", padx=6, pady=3,
+                        ).pack(side="left", padx=2)
+                    self._model_var.set(models[0])
+                else:
+                    self._status_var.set("⚠ Ollama running but no models!")
+            else:
+                self._status_var.set("✗ Ollama not running — start with: ollama serve")
+        except Exception:
+            self._status_var.set("✗ Ollama not found — install: ollama.ai")
+
+    def _save_api(self):
+        model = self._model_var.get().strip()
+        if not model:
             return
 
-        # Write .env file
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        env_path = BASE_DIR / ".env"
-        lines = []
-        if or_key:
-            lines += [f"OPENROUTER_KEY={or_key}",
-                      "OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free"]
-        if nv_key:
-            lines += [f"NVIDIA_KEY={nv_key}",
-                      "NVIDIA_MODEL=meta/llama-3.3-70b-instruct"]
-        if gr_key:
-            lines += [f"GROQ_KEY={gr_key}",
-                      "GROQ_MODEL=llama-3.3-70b-versatile",
-                      "GROQ_WORKER_MODEL=llama-3.1-8b-instant"]
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        # Also write legacy json
         with open(API_FILE, "w") as f:
-            json.dump({
-                "gemini_api_key": "",
-                "openrouter_key": or_key,
-                "nvidia_key":     nv_key,
-                "groq_key":       gr_key,
-            }, f, indent=4)
+            json.dump({"ollama_model": model, "tts": True}, f, indent=4)
 
         self.setup_frame.destroy()
         self._api_key_ready = True
         self.set_state("LISTENING")
+        self.write_log(f"SYS: RAHUL v5.0 online! Model: {model}")
+        self.write_log("SYS: Local AI ready — type ya bol ke command do!")
 
-        providers = [n for n, k in [("OpenRouter", or_key),
-                                     ("Nvidia", nv_key),
-                                     ("Groq", gr_key)] if k]
-        self.write_log(f"SYS: RAHUL v4.0 online! Providers: {', '.join(providers)}")
-        self.write_log("SYS: Swarm AI ready — type any command below!")
-
-MODEL_BADGE = "MK-37 ADVANCED"
+MODEL_BADGE = "OLLAMA LOCAL"
